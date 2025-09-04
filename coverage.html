@@ -1,0 +1,2867 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>bimawen.git: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">local.git/libs/bimawen.git/confirms.go (0.0%)</option>
+				
+				<option value="file1">local.git/libs/bimawen.git/factory.go (50.0%)</option>
+				
+				<option value="file2">local.git/libs/bimawen.git/pool.go (0.0%)</option>
+				
+				<option value="file3">local.git/libs/bimawen.git/rabbitmq.go (2.7%)</option>
+				
+				<option value="file4">local.git/libs/bimawen.git/redis.go (0.5%)</option>
+				
+				<option value="file5">local.git/libs/bimawen.git/retry.go (78.3%)</option>
+				
+				<option value="file6">local.git/libs/bimawen.git/serializer.go (100.0%)</option>
+				
+				<option value="file7">local.git/libs/bimawen.git/tls.go (56.2%)</option>
+				
+				<option value="file8">local.git/libs/bimawen.git/types.go (100.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package bimawen
+
+import (
+        "context"
+        "fmt"
+        "sync"
+        "time"
+
+        amqp "github.com/rabbitmq/amqp091-go"
+)
+
+// PublishConfirm represents a publish confirmation
+type PublishConfirm struct {
+        DeliveryTag uint64
+        Ack         bool
+        Error       error
+}
+
+// ConfirmChannel wraps an AMQP channel with confirmation support
+type ConfirmChannel struct {
+        channel       *amqp.Channel
+        confirmations chan amqp.Confirmation
+        returns       chan amqp.Return
+        mu            sync.RWMutex
+        closed        bool
+        nextSeqNo     uint64
+        pending       map[uint64]*PendingConfirm
+}
+
+// PendingConfirm represents a message waiting for confirmation
+type PendingConfirm struct {
+        SeqNo     uint64
+        ResultCh  chan PublishConfirm
+        Message   *Message
+        Topic     string
+        Timestamp time.Time
+}
+
+// NewConfirmChannel creates a new confirm channel
+func NewConfirmChannel(channel *amqp.Channel) (*ConfirmChannel, error) <span class="cov0" title="0">{
+        // Enable publish confirms
+        if err := channel.Confirm(false); err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to enable publisher confirms: %w", err)
+        }</span>
+
+        <span class="cov0" title="0">cc := &amp;ConfirmChannel{
+                channel:       channel,
+                confirmations: channel.NotifyPublish(make(chan amqp.Confirmation, 1000)),
+                returns:       channel.NotifyReturn(make(chan amqp.Return, 1000)),
+                nextSeqNo:     1,
+                pending:       make(map[uint64]*PendingConfirm),
+        }
+
+        // Start confirmation handler
+        go cc.handleConfirmations()
+        go cc.handleReturns()
+
+        return cc, nil</span>
+}
+
+// PublishWithConfirm publishes a message and waits for confirmation
+func (cc *ConfirmChannel) PublishWithConfirm(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (*PublishConfirm, error) <span class="cov0" title="0">{
+        cc.mu.Lock()
+        if cc.closed </span><span class="cov0" title="0">{
+                cc.mu.Unlock()
+                return nil, fmt.Errorf("channel is closed")
+        }</span>
+
+        <span class="cov0" title="0">seqNo := cc.nextSeqNo
+        cc.nextSeqNo++
+
+        // Create pending confirmation
+        pending := &amp;PendingConfirm{
+                SeqNo:     seqNo,
+                ResultCh:  make(chan PublishConfirm, 1),
+                Timestamp: time.Now(),
+        }
+        cc.pending[seqNo] = pending
+        cc.mu.Unlock()
+
+        // Publish the message
+        err := cc.channel.PublishWithContext(ctx, exchange, key, mandatory, immediate, msg)
+        if err != nil </span><span class="cov0" title="0">{
+                // Remove from pending on immediate error
+                cc.mu.Lock()
+                delete(cc.pending, seqNo)
+                cc.mu.Unlock()
+                return nil, fmt.Errorf("failed to publish message: %w", err)
+        }</span>
+
+        // Wait for confirmation with timeout
+        <span class="cov0" title="0">select </span>{
+        case confirm := &lt;-pending.ResultCh:<span class="cov0" title="0">
+                return &amp;confirm, nil</span>
+        case &lt;-ctx.Done():<span class="cov0" title="0">
+                // Clean up pending confirmation
+                cc.mu.Lock()
+                delete(cc.pending, seqNo)
+                cc.mu.Unlock()
+                return nil, ctx.Err()</span>
+        case &lt;-time.After(30 * time.Second):<span class="cov0" title="0">
+                // Timeout
+                cc.mu.Lock()
+                delete(cc.pending, seqNo)
+                cc.mu.Unlock()
+                return nil, fmt.Errorf("confirmation timeout for sequence %d", seqNo)</span>
+        }
+}
+
+// handleConfirmations processes confirmation messages
+func (cc *ConfirmChannel) handleConfirmations() <span class="cov0" title="0">{
+        for confirmation := range cc.confirmations </span><span class="cov0" title="0">{
+                cc.mu.Lock()
+                if pending, ok := cc.pending[confirmation.DeliveryTag]; ok </span><span class="cov0" title="0">{
+                        delete(cc.pending, confirmation.DeliveryTag)
+                        
+                        result := PublishConfirm{
+                                DeliveryTag: confirmation.DeliveryTag,
+                                Ack:         confirmation.Ack,
+                        }
+                        
+                        if !confirmation.Ack </span><span class="cov0" title="0">{
+                                result.Error = fmt.Errorf("message nacked by broker")
+                        }</span>
+                        
+                        // Send result to waiting goroutine
+                        <span class="cov0" title="0">select </span>{
+                        case pending.ResultCh &lt;- result:<span class="cov0" title="0"></span>
+                        default:<span class="cov0" title="0"></span>
+                                // Channel might be closed, ignore
+                        }
+                }
+                <span class="cov0" title="0">cc.mu.Unlock()</span>
+        }
+}
+
+// handleReturns processes returned messages (undeliverable messages)
+func (cc *ConfirmChannel) handleReturns() <span class="cov0" title="0">{
+        for returnMsg := range cc.returns </span><span class="cov0" title="0">{
+                // Find the corresponding pending confirmation by matching properties
+                // This is a best-effort approach since RabbitMQ doesn't provide sequence numbers for returns
+                cc.mu.Lock()
+                for seqNo, pending := range cc.pending </span><span class="cov0" title="0">{
+                        // Try to match based on timing (messages published recently)
+                        if time.Since(pending.Timestamp) &lt; 5*time.Second </span><span class="cov0" title="0">{
+                                delete(cc.pending, seqNo)
+                                
+                                result := PublishConfirm{
+                                        DeliveryTag: uint64(seqNo),
+                                        Ack:         false,
+                                        Error: fmt.Errorf("message returned: code=%d, text=%s, exchange=%s, routing_key=%s",
+                                                returnMsg.ReplyCode, returnMsg.ReplyText, returnMsg.Exchange, returnMsg.RoutingKey),
+                                }
+                                
+                                select </span>{
+                                case pending.ResultCh &lt;- result:<span class="cov0" title="0"></span>
+                                default:<span class="cov0" title="0"></span>
+                                }
+                                <span class="cov0" title="0">break</span>
+                        }
+                }
+                <span class="cov0" title="0">cc.mu.Unlock()</span>
+        }
+}
+
+// Close closes the confirm channel
+func (cc *ConfirmChannel) Close() error <span class="cov0" title="0">{
+        cc.mu.Lock()
+        defer cc.mu.Unlock()
+
+        if cc.closed </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+
+        <span class="cov0" title="0">cc.closed = true
+        
+        // Notify all pending confirmations of closure
+        for seqNo, pending := range cc.pending </span><span class="cov0" title="0">{
+                result := PublishConfirm{
+                        DeliveryTag: uint64(seqNo),
+                        Ack:         false,
+                        Error:       fmt.Errorf("channel closed"),
+                }
+                
+                select </span>{
+                case pending.ResultCh &lt;- result:<span class="cov0" title="0"></span>
+                default:<span class="cov0" title="0"></span>
+                }
+        }
+        
+        // Clear pending map
+        <span class="cov0" title="0">cc.pending = make(map[uint64]*PendingConfirm)
+        
+        return cc.channel.Close()</span>
+}
+
+// RabbitMQProducerWithConfirms extends RabbitMQProducer with publisher confirms
+type RabbitMQProducerWithConfirms struct {
+        pool            *ConnectionPool
+        options         *ProducerOptions
+        retryer         *Retryer
+        confirmChannels map[*amqp.Channel]*ConfirmChannel
+        channelMu       sync.RWMutex
+        mu              sync.RWMutex
+        closed          bool
+        enableConfirms  bool
+}
+
+// NewRabbitMQProducerWithConfirms creates a new RabbitMQ producer with publisher confirms
+func NewRabbitMQProducerWithConfirms(pool *ConnectionPool, options *ProducerOptions, enableConfirms bool) (*RabbitMQProducerWithConfirms, error) <span class="cov0" title="0">{
+        producer := &amp;RabbitMQProducerWithConfirms{
+                pool:            pool,
+                options:         options,
+                retryer:         NewRetryer(options.RetryConfig),
+                confirmChannels: make(map[*amqp.Channel]*ConfirmChannel),
+                enableConfirms:  enableConfirms,
+        }
+
+        return producer, nil
+}</span>
+
+// getConfirmChannel gets or creates a confirm channel for the given channel
+func (p *RabbitMQProducerWithConfirms) getConfirmChannel(ch *amqp.Channel) (*ConfirmChannel, error) <span class="cov0" title="0">{
+        p.channelMu.RLock()
+        if cc, ok := p.confirmChannels[ch]; ok </span><span class="cov0" title="0">{
+                p.channelMu.RUnlock()
+                return cc, nil
+        }</span>
+        <span class="cov0" title="0">p.channelMu.RUnlock()
+
+        p.channelMu.Lock()
+        defer p.channelMu.Unlock()
+
+        // Double-check after acquiring write lock
+        if cc, ok := p.confirmChannels[ch]; ok </span><span class="cov0" title="0">{
+                return cc, nil
+        }</span>
+
+        // Create new confirm channel
+        <span class="cov0" title="0">cc, err := NewConfirmChannel(ch)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">p.confirmChannels[ch] = cc
+        return cc, nil</span>
+}
+
+// Send implements the Producer interface
+func (p *RabbitMQProducerWithConfirms) Send(ctx context.Context, topic string, message *Message) error <span class="cov0" title="0">{
+        if p.enableConfirms </span><span class="cov0" title="0">{
+                confirm, err := p.SendWithConfirm(ctx, topic, message)
+                if err != nil </span><span class="cov0" title="0">{
+                        return err
+                }</span>
+                <span class="cov0" title="0">if !confirm.Ack </span><span class="cov0" title="0">{
+                        return fmt.Errorf("message not confirmed: %v", confirm.Error)
+                }</span>
+                <span class="cov0" title="0">return nil</span>
+        }
+        
+        // Fallback to regular send without confirms
+        <span class="cov0" title="0">return p.sendMessageWithoutConfirm(ctx, topic, message)</span>
+}
+
+// SendAsync implements the Producer interface
+func (p *RabbitMQProducerWithConfirms) SendAsync(ctx context.Context, topic string, message *Message) &lt;-chan error <span class="cov0" title="0">{
+        errChan := make(chan error, 1)
+
+        go func() </span><span class="cov0" title="0">{
+                defer close(errChan)
+                err := p.Send(ctx, topic, message)
+                errChan &lt;- err
+        }</span>()
+
+        <span class="cov0" title="0">return errChan</span>
+}
+
+// SendBatch implements the Producer interface
+func (p *RabbitMQProducerWithConfirms) SendBatch(ctx context.Context, topic string, messages []*Message) error <span class="cov0" title="0">{
+        for _, msg := range messages </span><span class="cov0" title="0">{
+                if err := p.Send(ctx, topic, msg); err != nil </span><span class="cov0" title="0">{
+                        return err
+                }</span>
+        }
+        <span class="cov0" title="0">return nil</span>
+}
+
+// sendMessageWithoutConfirm sends a message without waiting for confirmation
+func (p *RabbitMQProducerWithConfirms) sendMessageWithoutConfirm(ctx context.Context, topic string, message *Message) error <span class="cov0" title="0">{
+        return p.retryer.Retry(ctx, func(ctx context.Context) error </span><span class="cov0" title="0">{
+                return p.sendMessageRegular(ctx, topic, message)
+        }</span>)
+}
+
+// sendMessageRegular sends a message using regular publish (without confirms)
+func (p *RabbitMQProducerWithConfirms) sendMessageRegular(ctx context.Context, topic string, message *Message) error <span class="cov0" title="0">{
+        p.mu.RLock()
+        defer p.mu.RUnlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return NewNonRetryableError(fmt.Errorf("producer is closed"))
+        }</span>
+
+        // Get a channel from the pool
+        <span class="cov0" title="0">ch, err := p.pool.GetChannel()
+        if err != nil </span><span class="cov0" title="0">{
+                return WrapRetryableError(fmt.Errorf("failed to get channel: %w", err))
+        }</span>
+        <span class="cov0" title="0">defer p.pool.ReturnChannel(ch)
+
+        // Declare queue (idempotent)
+        _, err = ch.QueueDeclare(
+                topic, // queue name
+                true,  // durable
+                false, // delete when unused
+                false, // exclusive
+                false, // no-wait
+                nil,   // arguments
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return WrapRetryableError(fmt.Errorf("failed to declare queue: %w", err))
+        }</span>
+
+        // Prepare message
+        <span class="cov0" title="0">var body []byte
+        if message.Body != nil </span><span class="cov0" title="0">{
+                body = message.Body
+        }</span> else<span class="cov0" title="0"> {
+                return NewNonRetryableError(fmt.Errorf("message body is required"))
+        }</span>
+
+        // Prepare headers
+        <span class="cov0" title="0">headers := make(amqp.Table)
+        if message.Headers != nil </span><span class="cov0" title="0">{
+                for k, v := range message.Headers </span><span class="cov0" title="0">{
+                        headers[k] = v
+                }</span>
+        }
+        <span class="cov0" title="0">headers["timestamp"] = message.Timestamp.Unix()
+        headers["message_id"] = message.ID
+
+        // Create publishing context with timeout
+        publishCtx := ctx
+        if p.options.Timeout &gt; 0 </span><span class="cov0" title="0">{
+                var cancel context.CancelFunc
+                publishCtx, cancel = context.WithTimeout(ctx, p.options.Timeout)
+                defer cancel()
+        }</span>
+
+        // Publish message
+        <span class="cov0" title="0">err = ch.PublishWithContext(
+                publishCtx,
+                "",    // exchange
+                topic, // routing key
+                false, // mandatory
+                false, // immediate
+                amqp.Publishing{
+                        ContentType:  p.options.Serializer.ContentType(),
+                        Body:         body,
+                        Headers:      headers,
+                        Priority:     message.Priority,
+                        Timestamp:    message.Timestamp,
+                        DeliveryMode: amqp.Persistent, // make message persistent
+                        Expiration:   formatTTL(message.TTL),
+                },
+        )
+
+        if err != nil </span><span class="cov0" title="0">{
+                return WrapRetryableError(fmt.Errorf("failed to publish message: %w", err))
+        }</span>
+
+        <span class="cov0" title="0">return nil</span>
+}
+func (p *RabbitMQProducerWithConfirms) SendWithConfirm(ctx context.Context, topic string, message *Message) (*PublishConfirm, error) <span class="cov0" title="0">{
+        if !p.enableConfirms </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("publisher confirms are not enabled")
+        }</span>
+
+        <span class="cov0" title="0">var result *PublishConfirm
+        err := p.retryer.Retry(ctx, func(ctx context.Context) error </span><span class="cov0" title="0">{
+                confirm, err := p.sendMessageWithConfirm(ctx, topic, message)
+                if err != nil </span><span class="cov0" title="0">{
+                        return err
+                }</span>
+                
+                <span class="cov0" title="0">if !confirm.Ack </span><span class="cov0" title="0">{
+                        return NewRetryableError(confirm.Error)
+                }</span>
+                
+                <span class="cov0" title="0">result = confirm
+                return nil</span>
+        })
+        
+        <span class="cov0" title="0">return result, err</span>
+}
+
+// sendMessageWithConfirm sends a single message with confirmation
+func (p *RabbitMQProducerWithConfirms) sendMessageWithConfirm(ctx context.Context, topic string, message *Message) (*PublishConfirm, error) <span class="cov0" title="0">{
+        p.mu.RLock()
+        defer p.mu.RUnlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return nil, NewNonRetryableError(fmt.Errorf("producer is closed"))
+        }</span>
+
+        // Get a channel from the pool
+        <span class="cov0" title="0">ch, err := p.pool.GetChannel()
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, WrapRetryableError(fmt.Errorf("failed to get channel: %w", err))
+        }</span>
+        <span class="cov0" title="0">defer p.pool.ReturnChannel(ch)
+
+        // Get confirm channel
+        cc, err := p.getConfirmChannel(ch)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, WrapRetryableError(fmt.Errorf("failed to get confirm channel: %w", err))
+        }</span>
+
+        // Declare queue (idempotent)
+        <span class="cov0" title="0">_, err = ch.QueueDeclare(
+                topic, // queue name
+                true,  // durable
+                false, // delete when unused
+                false, // exclusive
+                false, // no-wait
+                nil,   // arguments
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, WrapRetryableError(fmt.Errorf("failed to declare queue: %w", err))
+        }</span>
+
+        // Prepare message
+        <span class="cov0" title="0">var body []byte
+        if message.Body != nil </span><span class="cov0" title="0">{
+                body = message.Body
+        }</span> else<span class="cov0" title="0"> {
+                return nil, NewNonRetryableError(fmt.Errorf("message body is required"))
+        }</span>
+
+        // Prepare headers
+        <span class="cov0" title="0">headers := make(amqp.Table)
+        if message.Headers != nil </span><span class="cov0" title="0">{
+                for k, v := range message.Headers </span><span class="cov0" title="0">{
+                        headers[k] = v
+                }</span>
+        }
+        <span class="cov0" title="0">headers["timestamp"] = message.Timestamp.Unix()
+        headers["message_id"] = message.ID
+
+        // Publish with confirmation
+        publishing := amqp.Publishing{
+                ContentType:  p.options.Serializer.ContentType(),
+                Body:         body,
+                Headers:      headers,
+                Priority:     message.Priority,
+                Timestamp:    message.Timestamp,
+                DeliveryMode: amqp.Persistent, // make message persistent
+                Expiration:   formatTTL(message.TTL),
+        }
+
+        return cc.PublishWithConfirm(ctx, "", topic, false, false, publishing)</span>
+}
+
+// Close closes the producer with confirms
+func (p *RabbitMQProducerWithConfirms) Close() error <span class="cov0" title="0">{
+        p.mu.Lock()
+        defer p.mu.Unlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+
+        <span class="cov0" title="0">p.closed = true
+        
+        // Close all confirm channels
+        p.channelMu.Lock()
+        for _, cc := range p.confirmChannels </span><span class="cov0" title="0">{
+                cc.Close()
+        }</span>
+        <span class="cov0" title="0">p.confirmChannels = make(map[*amqp.Channel]*ConfirmChannel)
+        p.channelMu.Unlock()
+
+        return nil</span>
+}</pre>
+		
+		<pre class="file" id="file1" style="display: none">package bimawen
+
+import (
+        "fmt"
+        "net/url"
+        "strconv"
+        "strings"
+)
+
+// DriverType represents the type of message queue driver
+type DriverType string
+
+const (
+        DriverRabbitMQ DriverType = "rabbitmq"
+        DriverRedis    DriverType = "redis"
+)
+
+// URIInfo contains parsed URI information
+type URIInfo struct {
+        DriverType DriverType
+        Host       string
+        Port       int
+        Username   string
+        Password   string
+        VHost      string  // For RabbitMQ
+        Database   int     // For Redis
+        Options    map[string]string
+}
+
+// ParseURI parses a connection URI and returns driver type and connection info
+func ParseURI(uri string) (*URIInfo, error) <span class="cov8" title="1">{
+        if uri == "" </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("URI cannot be empty")
+        }</span>
+
+        <span class="cov8" title="1">u, err := url.Parse(uri)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("invalid URI format: %w", err)
+        }</span>
+
+        <span class="cov8" title="1">info := &amp;URIInfo{
+                Options: make(map[string]string),
+        }
+
+        // Parse scheme to determine driver type and TLS
+        switch strings.ToLower(u.Scheme) </span>{
+        case "amqp", "amqps":<span class="cov8" title="1">
+                info.DriverType = DriverRabbitMQ
+                if u.Scheme == "amqps" </span><span class="cov8" title="1">{
+                        info.Options["tls"] = "true"
+                }</span>
+        case "redis", "rediss":<span class="cov8" title="1">
+                info.DriverType = DriverRedis
+                if u.Scheme == "rediss" </span><span class="cov8" title="1">{
+                        info.Options["tls"] = "true"
+                }</span>
+        default:<span class="cov8" title="1">
+                return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)</span>
+        }
+
+        // Parse host and port
+        <span class="cov8" title="1">info.Host = u.Hostname()
+        if info.Host == "" </span><span class="cov8" title="1">{
+                info.Host = "localhost"
+        }</span>
+
+        <span class="cov8" title="1">port := u.Port()
+        if port == "" </span><span class="cov8" title="1">{
+                // Set default ports based on driver type
+                switch info.DriverType </span>{
+                case DriverRabbitMQ:<span class="cov8" title="1">
+                        if u.Scheme == "amqps" </span><span class="cov0" title="0">{
+                                info.Port = 5671
+                        }</span> else<span class="cov8" title="1"> {
+                                info.Port = 5672
+                        }</span>
+                case DriverRedis:<span class="cov8" title="1">
+                        if u.Scheme == "rediss" </span><span class="cov0" title="0">{
+                                info.Port = 6380
+                        }</span> else<span class="cov8" title="1"> {
+                                info.Port = 6379
+                        }</span>
+                }
+        } else<span class="cov8" title="1"> {
+                info.Port, err = strconv.Atoi(port)
+                if err != nil </span><span class="cov0" title="0">{
+                        return nil, fmt.Errorf("invalid port: %s", port)
+                }</span>
+        }
+
+        // Parse authentication
+        <span class="cov8" title="1">if u.User != nil </span><span class="cov8" title="1">{
+                info.Username = u.User.Username()
+                if password, ok := u.User.Password(); ok </span><span class="cov8" title="1">{
+                        info.Password = password
+                }</span>
+        }
+
+        // Parse path and database specific info
+        <span class="cov8" title="1">switch info.DriverType </span>{
+        case DriverRabbitMQ:<span class="cov8" title="1">
+                // For RabbitMQ, path represents vhost
+                info.VHost = strings.TrimPrefix(u.Path, "/")
+                if info.VHost == "" </span><span class="cov8" title="1">{
+                        info.VHost = "/"
+                }</span> else<span class="cov8" title="1"> {
+                        info.VHost = "/" + info.VHost
+                }</span>
+        case DriverRedis:<span class="cov8" title="1">
+                // For Redis, path represents database number
+                if u.Path != "" &amp;&amp; u.Path != "/" </span><span class="cov8" title="1">{
+                        dbStr := strings.TrimPrefix(u.Path, "/")
+                        if dbStr != "" </span><span class="cov8" title="1">{
+                                info.Database, err = strconv.Atoi(dbStr)
+                                if err != nil </span><span class="cov0" title="0">{
+                                        return nil, fmt.Errorf("invalid database number: %s", dbStr)
+                                }</span>
+                                <span class="cov8" title="1">if info.Database &lt; 0 </span><span class="cov8" title="1">{
+                                        return nil, fmt.Errorf("database number cannot be negative: %d", info.Database)
+                                }</span>
+                        }
+                }
+        }
+
+        // Parse query parameters as options
+        <span class="cov8" title="1">for key, values := range u.Query() </span><span class="cov8" title="1">{
+                if len(values) &gt; 0 </span><span class="cov8" title="1">{
+                        info.Options[key] = values[0]
+                }</span>
+        }
+
+        <span class="cov8" title="1">return info, nil</span>
+}
+
+// DriverFactory creates drivers based on URI
+type DriverFactory struct {
+        drivers map[DriverType]DriverCreator
+}
+
+// DriverCreator is a function that creates a driver instance
+type DriverCreator func(info *URIInfo) (Driver, error)
+
+// NewDriverFactory creates a new driver factory
+func NewDriverFactory() *DriverFactory <span class="cov8" title="1">{
+        return &amp;DriverFactory{
+                drivers: make(map[DriverType]DriverCreator),
+        }
+}</span>
+
+// Register registers a driver creator for a specific driver type
+func (f *DriverFactory) Register(driverType DriverType, creator DriverCreator) <span class="cov8" title="1">{
+        f.drivers[driverType] = creator
+}</span>
+
+// Create creates a driver instance based on the URI
+func (f *DriverFactory) Create(uri string) (Driver, error) <span class="cov0" title="0">{
+        info, err := ParseURI(uri)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">creator, exists := f.drivers[info.DriverType]
+        if !exists </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("driver not registered for type: %s", info.DriverType)
+        }</span>
+
+        <span class="cov0" title="0">return creator(info)</span>
+}
+
+// DefaultDriverFactory is the global driver factory instance
+var DefaultDriverFactory = NewDriverFactory()
+
+// NewProducer creates a new producer using the default factory
+func NewProducer(uri string, opts ...*ProducerOptions) (Producer, error) <span class="cov0" title="0">{
+        driver, err := DefaultDriverFactory.Create(uri)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        // Merge options
+        <span class="cov0" title="0">options := DefaultProducerOptions()
+        if len(opts) &gt; 0 &amp;&amp; opts[0] != nil </span><span class="cov0" title="0">{
+                if opts[0].Timeout &gt; 0 </span><span class="cov0" title="0">{
+                        options.Timeout = opts[0].Timeout
+                }</span>
+                <span class="cov0" title="0">if opts[0].RetryConfig != nil </span><span class="cov0" title="0">{
+                        options.RetryConfig = opts[0].RetryConfig
+                }</span>
+                <span class="cov0" title="0">if opts[0].BatchSize &gt; 0 </span><span class="cov0" title="0">{
+                        options.BatchSize = opts[0].BatchSize
+                }</span>
+                <span class="cov0" title="0">if opts[0].Serializer != nil </span><span class="cov0" title="0">{
+                        options.Serializer = opts[0].Serializer
+                }</span>
+                <span class="cov0" title="0">for k, v := range opts[0].DriverOptions </span><span class="cov0" title="0">{
+                        options.DriverOptions[k] = v
+                }</span>
+        }
+
+        <span class="cov0" title="0">options.URI = uri
+        if options.Serializer == nil </span><span class="cov0" title="0">{
+                options.Serializer = DefaultSerializerRegistry.GetDefault()
+        }</span>
+
+        <span class="cov0" title="0">return driver.NewProducer(options)</span>
+}
+
+// NewConsumer creates a new consumer using the default factory
+func NewConsumer(uri string, opts ...*ConsumerOptions) (Consumer, error) <span class="cov0" title="0">{
+        driver, err := DefaultDriverFactory.Create(uri)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        // Merge options
+        <span class="cov0" title="0">options := DefaultConsumerOptions()
+        if len(opts) &gt; 0 &amp;&amp; opts[0] != nil </span><span class="cov0" title="0">{
+                if opts[0].Concurrency &gt; 0 </span><span class="cov0" title="0">{
+                        options.Concurrency = opts[0].Concurrency
+                }</span>
+                <span class="cov0" title="0">if opts[0].RetryConfig != nil </span><span class="cov0" title="0">{
+                        options.RetryConfig = opts[0].RetryConfig
+                }</span>
+                <span class="cov0" title="0">options.AutoAck = opts[0].AutoAck
+                if opts[0].Serializer != nil </span><span class="cov0" title="0">{
+                        options.Serializer = opts[0].Serializer
+                }</span>
+                <span class="cov0" title="0">for k, v := range opts[0].DriverOptions </span><span class="cov0" title="0">{
+                        options.DriverOptions[k] = v
+                }</span>
+        }
+
+        <span class="cov0" title="0">options.URI = uri
+        if options.Serializer == nil </span><span class="cov0" title="0">{
+                options.Serializer = DefaultSerializerRegistry.GetDefault()
+        }</span>
+
+        <span class="cov0" title="0">return driver.NewConsumer(options)</span>
+}</pre>
+		
+		<pre class="file" id="file2" style="display: none">package bimawen
+
+import (
+        "context"
+        "fmt"
+        "sync"
+        "time"
+
+        amqp "github.com/rabbitmq/amqp091-go"
+)
+
+// ConnectionPool manages a pool of RabbitMQ connections with TLS support
+type ConnectionPool struct {
+        uri              string
+        maxConnections   int
+        maxChannels      int
+        connections      []*PooledConnection
+        channels         chan *amqp.Channel
+        mu               sync.RWMutex
+        closed           bool
+        reconnectDelay   time.Duration
+        heartbeatTimeout time.Duration
+        tlsConfig        *TLSConfig
+}
+
+// PooledConnection wraps an AMQP connection with additional metadata
+type PooledConnection struct {
+        conn       *amqp.Connection
+        channels   chan *amqp.Channel
+        mu         sync.RWMutex
+        closed     bool
+        lastUsed   time.Time
+        channelCount int
+        maxChannels int
+}
+
+// ConnectionPoolConfig contains configuration for connection pool
+type ConnectionPoolConfig struct {
+        MaxConnections   int
+        MaxChannels      int
+        ReconnectDelay   time.Duration
+        HeartbeatTimeout time.Duration
+        IdleTimeout      time.Duration
+        TLSConfig        *TLSConfig
+}
+
+// DefaultConnectionPoolConfig returns default connection pool configuration
+func DefaultConnectionPoolConfig() *ConnectionPoolConfig <span class="cov0" title="0">{
+        return &amp;ConnectionPoolConfig{
+                MaxConnections:   5,
+                MaxChannels:      100,
+                ReconnectDelay:   5 * time.Second,
+                HeartbeatTimeout: 60 * time.Second,
+                IdleTimeout:      10 * time.Minute,
+        }
+}</span>
+
+// NewConnectionPool creates a new connection pool with TLS support
+func NewConnectionPool(uri string, config *ConnectionPoolConfig) (*ConnectionPool, error) <span class="cov0" title="0">{
+        if config == nil </span><span class="cov0" title="0">{
+                config = DefaultConnectionPoolConfig()
+        }</span>
+
+        <span class="cov0" title="0">pool := &amp;ConnectionPool{
+                uri:              uri,
+                maxConnections:   config.MaxConnections,
+                maxChannels:      config.MaxChannels,
+                connections:      make([]*PooledConnection, 0, config.MaxConnections),
+                channels:         make(chan *amqp.Channel, config.MaxChannels),
+                reconnectDelay:   config.ReconnectDelay,
+                heartbeatTimeout: config.HeartbeatTimeout,
+                tlsConfig:        config.TLSConfig,
+        }
+
+        // Initialize connections
+        for i := 0; i &lt; config.MaxConnections; i++ </span><span class="cov0" title="0">{
+                conn, err := pool.createConnection()
+                if err != nil </span><span class="cov0" title="0">{
+                        pool.Close()
+                        return nil, fmt.Errorf("failed to create initial connection %d: %w", i, err)
+                }</span>
+                <span class="cov0" title="0">pool.connections = append(pool.connections, conn)</span>
+        }
+
+        // Start connection health monitor
+        <span class="cov0" title="0">go pool.healthMonitor()
+
+        return pool, nil</span>
+}
+
+// createConnection creates a new pooled connection with TLS support
+func (p *ConnectionPool) createConnection() (*PooledConnection, error) <span class="cov0" title="0">{
+        var conn *amqp.Connection
+        var err error
+
+        // Use TLS if configured
+        if p.tlsConfig != nil &amp;&amp; p.tlsConfig.Enabled </span><span class="cov0" title="0">{
+                tlsConfig, err := p.tlsConfig.BuildTLSConfig()
+                if err != nil </span><span class="cov0" title="0">{
+                        return nil, fmt.Errorf("failed to build TLS config: %w", err)
+                }</span>
+                <span class="cov0" title="0">conn, err = amqp.DialTLS(p.uri, tlsConfig)</span>
+        } else<span class="cov0" title="0"> {
+                conn, err = amqp.Dial(p.uri)
+        }</span>
+        
+        <span class="cov0" title="0">if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">pooledConn := &amp;PooledConnection{
+                conn:        conn,
+                channels:    make(chan *amqp.Channel, p.maxChannels/p.maxConnections),
+                lastUsed:    time.Now(),
+                maxChannels: p.maxChannels / p.maxConnections,
+        }
+
+        // Pre-create some channels
+        for i := 0; i &lt; 10; i++ </span><span class="cov0" title="0">{
+                ch, err := conn.Channel()
+                if err != nil </span><span class="cov0" title="0">{
+                        break</span>
+                }
+                <span class="cov0" title="0">pooledConn.channels &lt;- ch
+                pooledConn.channelCount++</span>
+        }
+
+        // Listen for connection close events
+        <span class="cov0" title="0">go pooledConn.handleConnectionClose(p)
+
+        return pooledConn, nil</span>
+}
+
+// handleConnectionClose handles connection close events and triggers reconnection
+func (pc *PooledConnection) handleConnectionClose(pool *ConnectionPool) <span class="cov0" title="0">{
+        closeErr := &lt;-pc.conn.NotifyClose(make(chan *amqp.Error))
+        if closeErr != nil </span><span class="cov0" title="0">{
+                pc.mu.Lock()
+                pc.closed = true
+                // Close all channels in the pool
+                close(pc.channels)
+                for ch := range pc.channels </span><span class="cov0" title="0">{
+                        ch.Close()
+                }</span>
+                <span class="cov0" title="0">pc.mu.Unlock()
+
+                // Trigger reconnection
+                pool.reconnectConnection(pc)</span>
+        }
+}
+
+// reconnectConnection attempts to reconnect a failed connection
+func (p *ConnectionPool) reconnectConnection(oldConn *PooledConnection) <span class="cov0" title="0">{
+        p.mu.Lock()
+        defer p.mu.Unlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return
+        }</span>
+
+        // Find the connection in the pool and replace it
+        <span class="cov0" title="0">for i, conn := range p.connections </span><span class="cov0" title="0">{
+                if conn == oldConn </span><span class="cov0" title="0">{
+                        // Retry connection with exponential backoff
+                        var newConn *PooledConnection
+                        var err error
+                        
+                        backoff := p.reconnectDelay
+                        for attempts := 0; attempts &lt; 5 &amp;&amp; !p.closed; attempts++ </span><span class="cov0" title="0">{
+                                time.Sleep(backoff)
+                                newConn, err = p.createConnection()
+                                if err == nil </span><span class="cov0" title="0">{
+                                        break</span>
+                                }
+                                <span class="cov0" title="0">backoff *= 2
+                                if backoff &gt; 60*time.Second </span><span class="cov0" title="0">{
+                                        backoff = 60 * time.Second
+                                }</span>
+                        }
+
+                        <span class="cov0" title="0">if err == nil </span><span class="cov0" title="0">{
+                                p.connections[i] = newConn
+                        }</span>
+                        <span class="cov0" title="0">break</span>
+                }
+        }
+}
+
+// GetChannel gets a channel from the pool
+func (p *ConnectionPool) GetChannel() (*amqp.Channel, error) <span class="cov0" title="0">{
+        p.mu.RLock()
+        defer p.mu.RUnlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("connection pool is closed")
+        }</span>
+
+        // Try to get a channel from any connection
+        <span class="cov0" title="0">for _, conn := range p.connections </span><span class="cov0" title="0">{
+                if ch := conn.getChannel(); ch != nil </span><span class="cov0" title="0">{
+                        return ch, nil
+                }</span>
+        }
+
+        // If no cached channel available, create a new one
+        <span class="cov0" title="0">return p.createNewChannel()</span>
+}
+
+// createNewChannel creates a new channel from the least loaded connection
+func (p *ConnectionPool) createNewChannel() (*amqp.Channel, error) <span class="cov0" title="0">{
+        var bestConn *PooledConnection
+        minChannels := int(^uint(0) &gt;&gt; 1) // Max int
+
+        for _, conn := range p.connections </span><span class="cov0" title="0">{
+                conn.mu.RLock()
+                if !conn.closed &amp;&amp; conn.channelCount &lt; minChannels </span><span class="cov0" title="0">{
+                        minChannels = conn.channelCount
+                        bestConn = conn
+                }</span>
+                <span class="cov0" title="0">conn.mu.RUnlock()</span>
+        }
+
+        <span class="cov0" title="0">if bestConn == nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("no available connections")
+        }</span>
+
+        <span class="cov0" title="0">return bestConn.createChannel()</span>
+}
+
+// getChannel gets a channel from this connection's pool
+func (pc *PooledConnection) getChannel() *amqp.Channel <span class="cov0" title="0">{
+        pc.mu.RLock()
+        defer pc.mu.RUnlock()
+
+        if pc.closed </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+
+        <span class="cov0" title="0">select </span>{
+        case ch := &lt;-pc.channels:<span class="cov0" title="0">
+                pc.lastUsed = time.Now()
+                return ch</span>
+        default:<span class="cov0" title="0">
+                return nil</span>
+        }
+}
+
+// createChannel creates a new channel from this connection
+func (pc *PooledConnection) createChannel() (*amqp.Channel, error) <span class="cov0" title="0">{
+        pc.mu.Lock()
+        defer pc.mu.Unlock()
+
+        if pc.closed || pc.channelCount &gt;= pc.maxChannels </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("connection closed or max channels reached")
+        }</span>
+
+        <span class="cov0" title="0">ch, err := pc.conn.Channel()
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">pc.channelCount++
+        pc.lastUsed = time.Now()
+        return ch, nil</span>
+}
+
+// ReturnChannel returns a channel to the pool
+func (p *ConnectionPool) ReturnChannel(ch *amqp.Channel) <span class="cov0" title="0">{
+        if ch == nil </span><span class="cov0" title="0">{
+                return
+        }</span>
+
+        <span class="cov0" title="0">p.mu.RLock()
+        defer p.mu.RUnlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                ch.Close()
+                return
+        }</span>
+
+        // Find which connection this channel belongs to and return it
+        <span class="cov0" title="0">for _, conn := range p.connections </span><span class="cov0" title="0">{
+                if conn.returnChannel(ch) </span><span class="cov0" title="0">{
+                        break</span>
+                }
+        }
+}
+
+// returnChannel returns a channel to this connection's pool
+func (pc *PooledConnection) returnChannel(ch *amqp.Channel) bool <span class="cov0" title="0">{
+        pc.mu.Lock()
+        defer pc.mu.Unlock()
+
+        if pc.closed </span><span class="cov0" title="0">{
+                ch.Close()
+                return true
+        }</span>
+
+        <span class="cov0" title="0">select </span>{
+        case pc.channels &lt;- ch:<span class="cov0" title="0">
+                return true</span>
+        default:<span class="cov0" title="0">
+                // Channel pool is full, close the channel
+                ch.Close()
+                pc.channelCount--
+                return true</span>
+        }
+}
+
+// healthMonitor monitors connection health and performs cleanup
+func (p *ConnectionPool) healthMonitor() <span class="cov0" title="0">{
+        ticker := time.NewTicker(30 * time.Second)
+        defer ticker.Stop()
+
+        for </span><span class="cov0" title="0">{
+                select </span>{
+                case &lt;-ticker.C:<span class="cov0" title="0">
+                        p.performHealthCheck()</span>
+                }
+
+                <span class="cov0" title="0">p.mu.RLock()
+                if p.closed </span><span class="cov0" title="0">{
+                        p.mu.RUnlock()
+                        return
+                }</span>
+                <span class="cov0" title="0">p.mu.RUnlock()</span>
+        }
+}
+
+// performHealthCheck checks connection health and cleans up idle resources
+func (p *ConnectionPool) performHealthCheck() <span class="cov0" title="0">{
+        p.mu.Lock()
+        defer p.mu.Unlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return
+        }</span>
+
+        <span class="cov0" title="0">now := time.Now()
+        for _, conn := range p.connections </span><span class="cov0" title="0">{
+                conn.mu.Lock()
+                if !conn.closed </span><span class="cov0" title="0">{
+                        // Check if connection is still alive
+                        if conn.conn.IsClosed() </span><span class="cov0" title="0">{
+                                conn.closed = true
+                        }</span>
+                        
+                        // Clean up idle channels
+                        <span class="cov0" title="0">idle := now.Sub(conn.lastUsed)
+                        if idle &gt; 10*time.Minute </span><span class="cov0" title="0">{
+                                // Close some idle channels
+                                for i := 0; i &lt; 5 &amp;&amp; conn.channelCount &gt; 10; i++ </span><span class="cov0" title="0">{
+                                        select </span>{
+                                        case ch := &lt;-conn.channels:<span class="cov0" title="0">
+                                                ch.Close()
+                                                conn.channelCount--</span>
+                                        default:<span class="cov0" title="0">
+                                                break</span>
+                                        }
+                                }
+                        }
+                }
+                <span class="cov0" title="0">conn.mu.Unlock()</span>
+        }
+}
+
+// HealthCheck checks if the pool is healthy
+func (p *ConnectionPool) HealthCheck(ctx context.Context) error <span class="cov0" title="0">{
+        p.mu.RLock()
+        defer p.mu.RUnlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return fmt.Errorf("connection pool is closed")
+        }</span>
+
+        <span class="cov0" title="0">activeConnections := 0
+        for _, conn := range p.connections </span><span class="cov0" title="0">{
+                conn.mu.RLock()
+                if !conn.closed &amp;&amp; !conn.conn.IsClosed() </span><span class="cov0" title="0">{
+                        activeConnections++
+                }</span>
+                <span class="cov0" title="0">conn.mu.RUnlock()</span>
+        }
+
+        <span class="cov0" title="0">if activeConnections == 0 </span><span class="cov0" title="0">{
+                return fmt.Errorf("no active connections available")
+        }</span>
+
+        // Try to create a test channel
+        <span class="cov0" title="0">ch, err := p.GetChannel()
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to get test channel: %w", err)
+        }</span>
+        <span class="cov0" title="0">p.ReturnChannel(ch)
+
+        return nil</span>
+}
+
+// Close closes the connection pool and all connections
+func (p *ConnectionPool) Close() error <span class="cov0" title="0">{
+        p.mu.Lock()
+        defer p.mu.Unlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+
+        <span class="cov0" title="0">p.closed = true
+
+        // Close all connections
+        for _, conn := range p.connections </span><span class="cov0" title="0">{
+                conn.mu.Lock()
+                conn.closed = true
+                close(conn.channels)
+                for ch := range conn.channels </span><span class="cov0" title="0">{
+                        ch.Close()
+                }</span>
+                <span class="cov0" title="0">if conn.conn != nil &amp;&amp; !conn.conn.IsClosed() </span><span class="cov0" title="0">{
+                        conn.conn.Close()
+                }</span>
+                <span class="cov0" title="0">conn.mu.Unlock()</span>
+        }
+
+        <span class="cov0" title="0">close(p.channels)
+        return nil</span>
+}
+
+// Stats returns pool statistics
+func (p *ConnectionPool) Stats() map[string]interface{} <span class="cov0" title="0">{
+        p.mu.RLock()
+        defer p.mu.RUnlock()
+
+        stats := map[string]interface{}{
+                "max_connections": p.maxConnections,
+                "max_channels":    p.maxChannels,
+                "connections":     make([]map[string]interface{}, 0, len(p.connections)),
+        }
+
+        activeConnections := 0
+        totalChannels := 0
+
+        for i, conn := range p.connections </span><span class="cov0" title="0">{
+                conn.mu.RLock()
+                connStats := map[string]interface{}{
+                        "index":         i,
+                        "closed":        conn.closed,
+                        "is_conn_closed": conn.conn.IsClosed(),
+                        "channel_count": conn.channelCount,
+                        "last_used":     conn.lastUsed,
+                }
+                
+                if !conn.closed &amp;&amp; !conn.conn.IsClosed() </span><span class="cov0" title="0">{
+                        activeConnections++
+                }</span>
+                <span class="cov0" title="0">totalChannels += conn.channelCount
+                
+                stats["connections"] = append(stats["connections"].([]map[string]interface{}), connStats)
+                conn.mu.RUnlock()</span>
+        }
+
+        <span class="cov0" title="0">stats["active_connections"] = activeConnections
+        stats["total_channels"] = totalChannels
+
+        return stats</span>
+}</pre>
+		
+		<pre class="file" id="file3" style="display: none">package bimawen
+
+import (
+        "context"
+        "fmt"
+        "strconv"
+        "strings"
+        "sync"
+        "time"
+
+        amqp "github.com/rabbitmq/amqp091-go"
+)
+
+// RabbitMQDriver implements the Driver interface for RabbitMQ with connection pooling
+type RabbitMQDriver struct {
+        pool   *ConnectionPool
+        info   *URIInfo
+        mu     sync.RWMutex
+        closed bool
+}
+
+// NewRabbitMQDriver creates a new RabbitMQ driver instance with connection pooling and TLS support
+func NewRabbitMQDriver(info *URIInfo) (*RabbitMQDriver, error) <span class="cov0" title="0">{
+        // Build connection URL
+        var connURL string
+        if info.Username != "" &amp;&amp; info.Password != "" </span><span class="cov0" title="0">{
+                connURL = fmt.Sprintf("amqp://%s:%s@%s:%d%s",
+                        info.Username, info.Password, info.Host, info.Port, info.VHost)
+        }</span> else<span class="cov0" title="0"> {
+                connURL = fmt.Sprintf("amqp://%s:%d%s",
+                        info.Host, info.Port, info.VHost)
+        }</span>
+
+        // Create connection pool config
+        <span class="cov0" title="0">poolConfig := DefaultConnectionPoolConfig()
+        
+        // Apply URI options to pool config
+        if maxConn, ok := info.Options["max_connections"]; ok </span><span class="cov0" title="0">{
+                if val, err := parseInt(maxConn); err == nil &amp;&amp; val &gt; 0 </span><span class="cov0" title="0">{
+                        poolConfig.MaxConnections = val
+                }</span>
+        }
+        <span class="cov0" title="0">if maxCh, ok := info.Options["max_channels"]; ok </span><span class="cov0" title="0">{
+                if val, err := parseInt(maxCh); err == nil &amp;&amp; val &gt; 0 </span><span class="cov0" title="0">{
+                        poolConfig.MaxChannels = val
+                }</span>
+        }
+
+        // Parse TLS options from URI
+        <span class="cov0" title="0">tlsConfig := ParseTLSOptionsFromURI(info.Options)
+        poolConfig.TLSConfig = tlsConfig
+
+        // Adjust URL scheme for TLS
+        if tlsConfig.Enabled </span><span class="cov0" title="0">{
+                connURL = replaceScheme(connURL, "amqps")
+        }</span>
+
+        <span class="cov0" title="0">pool, err := NewConnectionPool(connURL, poolConfig)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to create connection pool: %w", err)
+        }</span>
+
+        <span class="cov0" title="0">driver := &amp;RabbitMQDriver{
+                pool: pool,
+                info: info,
+        }
+
+        return driver, nil</span>
+}
+
+// NewProducer creates a new RabbitMQ producer
+func (d *RabbitMQDriver) NewProducer(options *ProducerOptions) (Producer, error) <span class="cov0" title="0">{
+        d.mu.RLock()
+        defer d.mu.RUnlock()
+
+        if d.closed </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("driver is closed")
+        }</span>
+
+        // Check if publisher confirms are enabled
+        <span class="cov0" title="0">if options.EnableConfirms </span><span class="cov0" title="0">{
+                return NewRabbitMQProducerWithConfirms(d.pool, options, true)
+        }</span>
+
+        <span class="cov0" title="0">return NewRabbitMQProducer(d.pool, options)</span>
+}
+
+// NewConsumer creates a new RabbitMQ consumer
+func (d *RabbitMQDriver) NewConsumer(options *ConsumerOptions) (Consumer, error) <span class="cov0" title="0">{
+        d.mu.RLock()
+        defer d.mu.RUnlock()
+
+        if d.closed </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("driver is closed")
+        }</span>
+
+        <span class="cov0" title="0">return NewRabbitMQConsumer(d.pool, options)</span>
+}
+
+// HealthCheck checks if the connection pool is healthy
+func (d *RabbitMQDriver) HealthCheck(ctx context.Context) error <span class="cov0" title="0">{
+        d.mu.RLock()
+        defer d.mu.RUnlock()
+
+        if d.closed </span><span class="cov0" title="0">{
+                return fmt.Errorf("driver is closed")
+        }</span>
+
+        <span class="cov0" title="0">return d.pool.HealthCheck(ctx)</span>
+}
+
+// Close closes the driver and connection pool
+func (d *RabbitMQDriver) Close() error <span class="cov0" title="0">{
+        d.mu.Lock()
+        defer d.mu.Unlock()
+
+        if d.closed </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+
+        <span class="cov0" title="0">d.closed = true
+        if d.pool != nil </span><span class="cov0" title="0">{
+                return d.pool.Close()
+        }</span>
+        <span class="cov0" title="0">return nil</span>
+}
+
+// RabbitMQProducer implements the Producer interface for RabbitMQ with connection pooling
+type RabbitMQProducer struct {
+        pool    *ConnectionPool
+        options *ProducerOptions
+        retryer *Retryer
+        mu      sync.RWMutex
+        closed  bool
+}
+
+// NewRabbitMQProducer creates a new RabbitMQ producer
+func NewRabbitMQProducer(pool *ConnectionPool, options *ProducerOptions) (*RabbitMQProducer, error) <span class="cov0" title="0">{
+        producer := &amp;RabbitMQProducer{
+                pool:    pool,
+                options: options,
+                retryer: NewRetryer(options.RetryConfig),
+        }
+
+        return producer, nil
+}</span>
+
+// Send sends a message synchronously
+func (p *RabbitMQProducer) Send(ctx context.Context, topic string, message *Message) error <span class="cov0" title="0">{
+        return p.retryer.Retry(ctx, func(ctx context.Context) error </span><span class="cov0" title="0">{
+                return p.sendMessage(ctx, topic, message)
+        }</span>)
+}
+
+// SendAsync sends a message asynchronously
+func (p *RabbitMQProducer) SendAsync(ctx context.Context, topic string, message *Message) &lt;-chan error <span class="cov0" title="0">{
+        errChan := make(chan error, 1)
+
+        go func() </span><span class="cov0" title="0">{
+                defer close(errChan)
+                err := p.Send(ctx, message.Topic, message)
+                errChan &lt;- err
+        }</span>()
+
+        <span class="cov0" title="0">return errChan</span>
+}
+
+// SendBatch sends multiple messages in a batch
+func (p *RabbitMQProducer) SendBatch(ctx context.Context, topic string, messages []*Message) error <span class="cov0" title="0">{
+        return p.retryer.Retry(ctx, func(ctx context.Context) error </span><span class="cov0" title="0">{
+                for _, msg := range messages </span><span class="cov0" title="0">{
+                        if err := p.sendMessage(ctx, topic, msg); err != nil </span><span class="cov0" title="0">{
+                                return err
+                        }</span>
+                }
+                <span class="cov0" title="0">return nil</span>
+        })
+}
+
+// sendMessage sends a single message using pooled connections
+func (p *RabbitMQProducer) sendMessage(ctx context.Context, topic string, message *Message) error <span class="cov0" title="0">{
+        p.mu.RLock()
+        defer p.mu.RUnlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return NewNonRetryableError(fmt.Errorf("producer is closed"))
+        }</span>
+
+        // Get a channel from the pool
+        <span class="cov0" title="0">ch, err := p.pool.GetChannel()
+        if err != nil </span><span class="cov0" title="0">{
+                return WrapRetryableError(fmt.Errorf("failed to get channel: %w", err))
+        }</span>
+        <span class="cov0" title="0">defer p.pool.ReturnChannel(ch)
+
+        // Serialize message body if it's not already bytes
+        var body []byte
+
+        if message.Body != nil </span><span class="cov0" title="0">{
+                body = message.Body
+        }</span> else<span class="cov0" title="0"> {
+                return NewNonRetryableError(fmt.Errorf("message body is required"))
+        }</span>
+
+        // Declare queue (idempotent)
+        <span class="cov0" title="0">_, err = ch.QueueDeclare(
+                topic, // queue name
+                true,  // durable
+                false, // delete when unused
+                false, // exclusive
+                false, // no-wait
+                nil,   // arguments
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return WrapRetryableError(fmt.Errorf("failed to declare queue: %w", err))
+        }</span>
+
+        // Prepare headers
+        <span class="cov0" title="0">headers := make(amqp.Table)
+        if message.Headers != nil </span><span class="cov0" title="0">{
+                for k, v := range message.Headers </span><span class="cov0" title="0">{
+                        headers[k] = v
+                }</span>
+        }
+        <span class="cov0" title="0">headers["timestamp"] = message.Timestamp.Unix()
+        headers["message_id"] = message.ID
+
+        // Create publishing context with timeout
+        publishCtx := ctx
+        if p.options.Timeout &gt; 0 </span><span class="cov0" title="0">{
+                var cancel context.CancelFunc
+                publishCtx, cancel = context.WithTimeout(ctx, p.options.Timeout)
+                defer cancel()
+        }</span>
+
+        // Publish message
+        <span class="cov0" title="0">err = ch.PublishWithContext(
+                publishCtx,
+                "",    // exchange
+                topic, // routing key
+                false, // mandatory
+                false, // immediate
+                amqp.Publishing{
+                        ContentType:   p.options.Serializer.ContentType(),
+                        Body:          body,
+                        Headers:       headers,
+                        Priority:      message.Priority,
+                        Timestamp:     message.Timestamp,
+                        DeliveryMode:  amqp.Persistent, // make message persistent
+                        Expiration:    formatTTL(message.TTL),
+                },
+        )
+
+        if err != nil </span><span class="cov0" title="0">{
+                return WrapRetryableError(fmt.Errorf("failed to publish message: %w", err))
+        }</span>
+
+        <span class="cov0" title="0">return nil</span>
+}
+
+// Close closes the producer
+func (p *RabbitMQProducer) Close() error <span class="cov0" title="0">{
+        p.mu.Lock()
+        defer p.mu.Unlock()
+
+        p.closed = true
+        return nil
+}</span>
+
+// RabbitMQConsumer implements the Consumer interface for RabbitMQ with connection pooling
+type RabbitMQConsumer struct {
+        pool    *ConnectionPool
+        options *ConsumerOptions
+        retryer *Retryer
+        mu      sync.RWMutex
+        closed  bool
+}
+
+// NewRabbitMQConsumer creates a new RabbitMQ consumer
+func NewRabbitMQConsumer(pool *ConnectionPool, options *ConsumerOptions) (*RabbitMQConsumer, error) <span class="cov0" title="0">{
+        consumer := &amp;RabbitMQConsumer{
+                pool:    pool,
+                options: options,
+                retryer: NewRetryer(options.RetryConfig),
+        }
+
+        return consumer, nil
+}</span>
+
+// Consume starts consuming messages from a topic
+func (c *RabbitMQConsumer) Consume(ctx context.Context, topic string, handler MessageHandler) error <span class="cov0" title="0">{
+        return c.ConsumeWithOptions(ctx, topic, handler, nil)
+}</span>
+
+// ConsumeWithOptions starts consuming with specific options using pooled connections
+func (c *RabbitMQConsumer) ConsumeWithOptions(ctx context.Context, topic string, handler MessageHandler, opts *ConsumeOptions) error <span class="cov0" title="0">{
+        c.mu.RLock()
+        defer c.mu.RUnlock()
+
+        if c.closed </span><span class="cov0" title="0">{
+                return fmt.Errorf("consumer is closed")
+        }</span>
+
+        // Get a channel from the pool
+        <span class="cov0" title="0">ch, err := c.pool.GetChannel()
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to get channel: %w", err)
+        }</span>
+        <span class="cov0" title="0">defer c.pool.ReturnChannel(ch)
+
+        // Set QoS for fair dispatch
+        err = ch.Qos(
+                c.options.Concurrency, // prefetch count
+                0,                     // prefetch size
+                false,                 // global
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to set QoS: %w", err)
+        }</span>
+
+        // Declare queue (idempotent)
+        <span class="cov0" title="0">_, err = ch.QueueDeclare(
+                topic, // queue name
+                true,  // durable
+                false, // delete when unused
+                false, // exclusive
+                false, // no-wait
+                nil,   // arguments
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to declare queue: %w", err)
+        }</span>
+
+        // Start consuming
+        <span class="cov0" title="0">msgs, err := ch.Consume(
+                topic, // queue
+                "",    // consumer
+                false, // auto-ack
+                false, // exclusive
+                false, // no-local
+                false, // no-wait
+                nil,   // args
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to register consumer: %w", err)
+        }</span>
+
+        // Handle messages in goroutines
+        <span class="cov0" title="0">semaphore := make(chan struct{}, c.options.Concurrency)
+
+        go func() </span><span class="cov0" title="0">{
+                for delivery := range msgs </span><span class="cov0" title="0">{
+                        select </span>{
+                        case &lt;-ctx.Done():<span class="cov0" title="0">
+                                return</span>
+                        case semaphore &lt;- struct{}{}:<span class="cov0" title="0"></span> // acquire semaphore
+                        }
+
+                        <span class="cov0" title="0">go func(d amqp.Delivery) </span><span class="cov0" title="0">{
+                                defer func() </span><span class="cov0" title="0">{ &lt;-semaphore }</span>() // release semaphore
+
+                                // Convert AMQP delivery to our Message type
+                                <span class="cov0" title="0">message := &amp;Message{
+                                        ID:            d.MessageId,
+                                        Topic:         topic,
+                                        Body:          d.Body,
+                                        Headers:       make(map[string]interface{}),
+                                        Timestamp:     d.Timestamp,
+                                        DeliveryCount: 1, // RabbitMQ doesn't expose delivery count directly
+                                        Priority:      d.Priority,
+                                }
+
+                                // Copy headers
+                                for k, v := range d.Headers </span><span class="cov0" title="0">{
+                                        message.Headers[k] = v
+                                }</span>
+
+                                // Handle message with retry
+                                <span class="cov0" title="0">err := c.retryer.Retry(ctx, func(ctx context.Context) error </span><span class="cov0" title="0">{
+                                        return handler(ctx, message)
+                                }</span>)
+
+                                // Handle acknowledgment
+                                <span class="cov0" title="0">if err != nil </span><span class="cov0" title="0">{
+                                        // Reject and requeue for retryable errors
+                                        if IsRetryableError(err) </span><span class="cov0" title="0">{
+                                                d.Nack(false, true) // requeue
+                                        }</span> else<span class="cov0" title="0"> {
+                                                d.Nack(false, false) // don't requeue
+                                        }</span>
+                                } else<span class="cov0" title="0"> {
+                                        if !c.options.AutoAck </span><span class="cov0" title="0">{
+                                                d.Ack(false)
+                                        }</span>
+                                }
+                        }(delivery)
+                }
+        }()
+
+        // Wait for context cancellation
+        <span class="cov0" title="0">&lt;-ctx.Done()
+        return ctx.Err()</span>
+}
+
+// Close closes the consumer
+func (c *RabbitMQConsumer) Close() error <span class="cov0" title="0">{
+        c.mu.Lock()
+        defer c.mu.Unlock()
+
+        c.closed = true
+        return nil
+}</span>
+
+// parseInt safely converts string to int
+func parseInt(s string) (int, error) <span class="cov0" title="0">{
+        return strconv.Atoi(s)
+}</span>
+
+// replaceScheme replaces the scheme in a URL
+func replaceScheme(url, newScheme string) string <span class="cov8" title="1">{
+        if idx := strings.Index(url, "://"); idx != -1 </span><span class="cov8" title="1">{
+                return newScheme + url[idx:]
+        }</span>
+        <span class="cov8" title="1">return url</span>
+}
+
+// formatTTL formats TTL duration to RabbitMQ expiration format
+func formatTTL(ttl time.Duration) string <span class="cov0" title="0">{
+        if ttl &lt;= 0 </span><span class="cov0" title="0">{
+                return ""
+        }</span>
+        <span class="cov0" title="0">return fmt.Sprintf("%d", int64(ttl/time.Millisecond))</span>
+}
+
+// Register RabbitMQ driver with the default factory
+func init() <span class="cov8" title="1">{
+        DefaultDriverFactory.Register(DriverRabbitMQ, func(info *URIInfo) (Driver, error) </span><span class="cov0" title="0">{
+                return NewRabbitMQDriver(info)
+        }</span>)
+}</pre>
+		
+		<pre class="file" id="file4" style="display: none">package bimawen
+
+import (
+        "context"
+        "fmt"
+        "strconv"
+        "sync"
+        "time"
+
+        "github.com/redis/go-redis/v9"
+)
+
+// RedisDriver implements the Driver interface for Redis
+type RedisDriver struct {
+        client *redis.Client
+        info   *URIInfo
+        mu     sync.RWMutex
+        closed bool
+}
+
+// NewRedisDriver creates a new Redis driver instance
+func NewRedisDriver(info *URIInfo) (*RedisDriver, error) <span class="cov0" title="0">{
+        // Build Redis options
+        opts := &amp;redis.Options{
+                Addr:     fmt.Sprintf("%s:%d", info.Host, info.Port),
+                Username: info.Username,
+                Password: info.Password,
+                DB:       info.Database,
+        }
+
+        // Apply additional options from URI query parameters
+        if timeout, ok := info.Options["timeout"]; ok </span><span class="cov0" title="0">{
+                if t, err := time.ParseDuration(timeout); err == nil </span><span class="cov0" title="0">{
+                        opts.DialTimeout = t
+                        opts.ReadTimeout = t
+                        opts.WriteTimeout = t
+                }</span>
+        }
+
+        <span class="cov0" title="0">if poolSize, ok := info.Options["pool_size"]; ok </span><span class="cov0" title="0">{
+                if size, err := strconv.Atoi(poolSize); err == nil &amp;&amp; size &gt; 0 </span><span class="cov0" title="0">{
+                        opts.PoolSize = size
+                }</span>
+        }
+
+        <span class="cov0" title="0">if minIdleConns, ok := info.Options["min_idle_conns"]; ok </span><span class="cov0" title="0">{
+                if conns, err := strconv.Atoi(minIdleConns); err == nil &amp;&amp; conns &gt;= 0 </span><span class="cov0" title="0">{
+                        opts.MinIdleConns = conns
+                }</span>
+        }
+
+        // Create Redis client
+        <span class="cov0" title="0">client := redis.NewClient(opts)
+
+        driver := &amp;RedisDriver{
+                client: client,
+                info:   info,
+        }
+
+        // Test connection
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        
+        if err := client.Ping(ctx).Err(); err != nil </span><span class="cov0" title="0">{
+                client.Close()
+                return nil, fmt.Errorf("failed to connect to Redis: %w", err)
+        }</span>
+
+        <span class="cov0" title="0">return driver, nil</span>
+}
+
+// NewProducer creates a new Redis producer
+func (d *RedisDriver) NewProducer(options *ProducerOptions) (Producer, error) <span class="cov0" title="0">{
+        d.mu.RLock()
+        defer d.mu.RUnlock()
+
+        if d.closed </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("driver is closed")
+        }</span>
+
+        <span class="cov0" title="0">return NewRedisProducer(d.client, options)</span>
+}
+
+// NewConsumer creates a new Redis consumer
+func (d *RedisDriver) NewConsumer(options *ConsumerOptions) (Consumer, error) <span class="cov0" title="0">{
+        d.mu.RLock()
+        defer d.mu.RUnlock()
+
+        if d.closed </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("driver is closed")
+        }</span>
+
+        <span class="cov0" title="0">return NewRedisConsumer(d.client, options)</span>
+}
+
+// HealthCheck checks if the connection is healthy
+func (d *RedisDriver) HealthCheck(ctx context.Context) error <span class="cov0" title="0">{
+        d.mu.RLock()
+        defer d.mu.RUnlock()
+
+        if d.closed </span><span class="cov0" title="0">{
+                return fmt.Errorf("driver is closed")
+        }</span>
+
+        <span class="cov0" title="0">return d.client.Ping(ctx).Err()</span>
+}
+
+// Close closes the driver and all its connections
+func (d *RedisDriver) Close() error <span class="cov0" title="0">{
+        d.mu.Lock()
+        defer d.mu.Unlock()
+
+        if d.closed </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+
+        <span class="cov0" title="0">d.closed = true
+        if d.client != nil </span><span class="cov0" title="0">{
+                return d.client.Close()
+        }</span>
+        <span class="cov0" title="0">return nil</span>
+}
+
+// RedisProducer implements the Producer interface for Redis
+type RedisProducer struct {
+        client   *redis.Client
+        options  *ProducerOptions
+        retryer  *Retryer
+        mu       sync.RWMutex
+        closed   bool
+}
+
+// NewRedisProducer creates a new Redis producer
+func NewRedisProducer(client *redis.Client, options *ProducerOptions) (*RedisProducer, error) <span class="cov0" title="0">{
+        producer := &amp;RedisProducer{
+                client:  client,
+                options: options,
+                retryer: NewRetryer(options.RetryConfig),
+        }
+
+        return producer, nil
+}</span>
+
+// Send sends a message synchronously using Redis list
+func (p *RedisProducer) Send(ctx context.Context, topic string, message *Message) error <span class="cov0" title="0">{
+        return p.retryer.Retry(ctx, func(ctx context.Context) error </span><span class="cov0" title="0">{
+                return p.sendMessage(ctx, topic, message)
+        }</span>)
+}
+
+// SendAsync sends a message asynchronously
+func (p *RedisProducer) SendAsync(ctx context.Context, topic string, message *Message) &lt;-chan error <span class="cov0" title="0">{
+        errChan := make(chan error, 1)
+
+        go func() </span><span class="cov0" title="0">{
+                defer close(errChan)
+                err := p.Send(ctx, topic, message)
+                errChan &lt;- err
+        }</span>()
+
+        <span class="cov0" title="0">return errChan</span>
+}
+
+// SendBatch sends multiple messages in a batch using pipeline
+func (p *RedisProducer) SendBatch(ctx context.Context, topic string, messages []*Message) error <span class="cov0" title="0">{
+        return p.retryer.Retry(ctx, func(ctx context.Context) error </span><span class="cov0" title="0">{
+                pipe := p.client.Pipeline()
+
+                for _, msg := range messages </span><span class="cov0" title="0">{
+                        // Serialize the message
+                        data, err := p.serializeMessage(msg)
+                        if err != nil </span><span class="cov0" title="0">{
+                                return NewNonRetryableError(fmt.Errorf("failed to serialize message: %w", err))
+                        }</span>
+
+                        // Add to pipeline
+                        <span class="cov0" title="0">pipe.LPush(ctx, topic, data)
+                        
+                        // Set TTL if specified
+                        if msg.TTL &gt; 0 </span><span class="cov0" title="0">{
+                                pipe.Expire(ctx, topic, msg.TTL)
+                        }</span>
+                }
+
+                // Execute pipeline
+                <span class="cov0" title="0">_, err := pipe.Exec(ctx)
+                if err != nil </span><span class="cov0" title="0">{
+                        return WrapRetryableError(fmt.Errorf("failed to execute batch: %w", err))
+                }</span>
+
+                <span class="cov0" title="0">return nil</span>
+        })
+}
+
+// sendMessage sends a single message
+func (p *RedisProducer) sendMessage(ctx context.Context, topic string, message *Message) error <span class="cov0" title="0">{
+        p.mu.RLock()
+        defer p.mu.RUnlock()
+
+        if p.closed </span><span class="cov0" title="0">{
+                return NewNonRetryableError(fmt.Errorf("producer is closed"))
+        }</span>
+
+        // Serialize the message
+        <span class="cov0" title="0">data, err := p.serializeMessage(message)
+        if err != nil </span><span class="cov0" title="0">{
+                return NewNonRetryableError(fmt.Errorf("failed to serialize message: %w", err))
+        }</span>
+
+        // Create context with timeout if specified
+        <span class="cov0" title="0">sendCtx := ctx
+        if p.options.Timeout &gt; 0 </span><span class="cov0" title="0">{
+                var cancel context.CancelFunc
+                sendCtx, cancel = context.WithTimeout(ctx, p.options.Timeout)
+                defer cancel()
+        }</span>
+
+        // Handle delayed messages
+        <span class="cov0" title="0">if message.Delay &gt; 0 </span><span class="cov0" title="0">{
+                // Use sorted set for delayed messages
+                delayedKey := fmt.Sprintf("%s:delayed", topic)
+                score := float64(time.Now().Add(message.Delay).Unix())
+                
+                err = p.client.ZAdd(sendCtx, delayedKey, redis.Z{
+                        Score:  score,
+                        Member: data,
+                }).Err()
+        }</span> else<span class="cov0" title="0"> {
+                // Send immediately using list
+                err = p.client.LPush(sendCtx, topic, data).Err()
+        }</span>
+
+        <span class="cov0" title="0">if err != nil </span><span class="cov0" title="0">{
+                return WrapRetryableError(fmt.Errorf("failed to send message: %w", err))
+        }</span>
+
+        // Set TTL if specified
+        <span class="cov0" title="0">if message.TTL &gt; 0 </span><span class="cov0" title="0">{
+                p.client.Expire(sendCtx, topic, message.TTL)
+        }</span>
+
+        <span class="cov0" title="0">return nil</span>
+}
+
+// serializeMessage serializes a message to JSON format
+func (p *RedisProducer) serializeMessage(message *Message) (string, error) <span class="cov0" title="0">{
+        // Create a serializable message structure
+        msgData := map[string]interface{}{
+                "id":             message.ID,
+                "body":           string(message.Body),
+                "headers":        message.Headers,
+                "timestamp":      message.Timestamp.Unix(),
+                "delivery_count": message.DeliveryCount,
+                "priority":       message.Priority,
+        }
+
+        data, err := p.options.Serializer.Serialize(msgData)
+        if err != nil </span><span class="cov0" title="0">{
+                return "", err
+        }</span>
+
+        <span class="cov0" title="0">return string(data), nil</span>
+}
+
+// Close closes the producer
+func (p *RedisProducer) Close() error <span class="cov0" title="0">{
+        p.mu.Lock()
+        defer p.mu.Unlock()
+
+        p.closed = true
+        return nil
+}</span>
+
+// RedisConsumer implements the Consumer interface for Redis
+type RedisConsumer struct {
+        client   *redis.Client
+        options  *ConsumerOptions
+        retryer  *Retryer
+        mu       sync.RWMutex
+        closed   bool
+}
+
+// NewRedisConsumer creates a new Redis consumer
+func NewRedisConsumer(client *redis.Client, options *ConsumerOptions) (*RedisConsumer, error) <span class="cov0" title="0">{
+        consumer := &amp;RedisConsumer{
+                client:  client,
+                options: options,
+                retryer: NewRetryer(options.RetryConfig),
+        }
+
+        return consumer, nil
+}</span>
+
+// Consume starts consuming messages from a topic
+func (c *RedisConsumer) Consume(ctx context.Context, topic string, handler MessageHandler) error <span class="cov0" title="0">{
+        return c.ConsumeWithOptions(ctx, topic, handler, nil)
+}</span>
+
+// ConsumeWithOptions starts consuming with specific options
+func (c *RedisConsumer) ConsumeWithOptions(ctx context.Context, topic string, handler MessageHandler, opts *ConsumeOptions) error <span class="cov0" title="0">{
+        c.mu.RLock()
+        defer c.mu.RUnlock()
+
+        if c.closed </span><span class="cov0" title="0">{
+                return fmt.Errorf("consumer is closed")
+        }</span>
+
+        // Create worker goroutines
+        <span class="cov0" title="0">workerChan := make(chan string, c.options.Concurrency)
+        var wg sync.WaitGroup
+
+        // Start workers
+        for i := 0; i &lt; c.options.Concurrency; i++ </span><span class="cov0" title="0">{
+                wg.Add(1)
+                go func() </span><span class="cov0" title="0">{
+                        defer wg.Done()
+                        c.worker(ctx, topic, handler, workerChan)
+                }</span>()
+        }
+
+        // Start fetching messages
+        <span class="cov0" title="0">go func() </span><span class="cov0" title="0">{
+                defer close(workerChan)
+                c.fetchMessages(ctx, topic, workerChan, opts)
+        }</span>()
+
+        // Wait for context cancellation or workers to finish
+        <span class="cov0" title="0">&lt;-ctx.Done()
+        wg.Wait()
+
+        return ctx.Err()</span>
+}
+
+// fetchMessages fetches messages from Redis and sends them to workers
+func (c *RedisConsumer) fetchMessages(ctx context.Context, topic string, workerChan chan&lt;- string, opts *ConsumeOptions) <span class="cov0" title="0">{
+        maxMessages := -1
+        if opts != nil &amp;&amp; opts.MaxMessages &gt; 0 </span><span class="cov0" title="0">{
+                maxMessages = opts.MaxMessages
+        }</span>
+
+        <span class="cov0" title="0">messageCount := 0
+
+        for </span><span class="cov0" title="0">{
+                select </span>{
+                case &lt;-ctx.Done():<span class="cov0" title="0">
+                        return</span>
+                default:<span class="cov0" title="0"></span>
+                }
+
+                // Check if we've reached the message limit
+                <span class="cov0" title="0">if maxMessages &gt; 0 &amp;&amp; messageCount &gt;= maxMessages </span><span class="cov0" title="0">{
+                        return
+                }</span>
+
+                // First check for delayed messages that are ready
+                <span class="cov0" title="0">c.processDelayedMessages(ctx, topic)
+
+                // Try to pop a message from the list
+                result, err := c.client.BRPop(ctx, time.Second, topic).Result()
+                if err != nil </span><span class="cov0" title="0">{
+                        if err == redis.Nil </span><span class="cov0" title="0">{
+                                continue</span> // No message available, retry
+                        }
+                        <span class="cov0" title="0">if err == context.Canceled || err == context.DeadlineExceeded </span><span class="cov0" title="0">{
+                                return
+                        }</span>
+                        // Log error and continue
+                        <span class="cov0" title="0">continue</span>
+                }
+
+                <span class="cov0" title="0">if len(result) &gt;= 2 </span><span class="cov0" title="0">{
+                        select </span>{
+                        case workerChan &lt;- result[1]:<span class="cov0" title="0">
+                                messageCount++</span>
+                        case &lt;-ctx.Done():<span class="cov0" title="0">
+                                return</span>
+                        }
+                }
+        }
+}
+
+// processDelayedMessages moves ready delayed messages to the main queue
+func (c *RedisConsumer) processDelayedMessages(ctx context.Context, topic string) <span class="cov0" title="0">{
+        delayedKey := fmt.Sprintf("%s:delayed", topic)
+        now := float64(time.Now().Unix())
+
+        // Get messages that are ready to be processed
+        result, err := c.client.ZRangeByScoreWithScores(ctx, delayedKey, &amp;redis.ZRangeBy{
+                Min:   "-inf",
+                Max:   fmt.Sprintf("%f", now),
+                Count: 100, // Process up to 100 delayed messages at once
+        }).Result()
+
+        if err != nil || len(result) == 0 </span><span class="cov0" title="0">{
+                return
+        }</span>
+
+        // Move messages to the main queue
+        <span class="cov0" title="0">pipe := c.client.Pipeline()
+        for _, z := range result </span><span class="cov0" title="0">{
+                pipe.LPush(ctx, topic, z.Member)
+                pipe.ZRem(ctx, delayedKey, z.Member)
+        }</span>
+        <span class="cov0" title="0">pipe.Exec(ctx)</span>
+}
+
+// worker processes messages from the worker channel
+func (c *RedisConsumer) worker(ctx context.Context, topic string, handler MessageHandler, workerChan &lt;-chan string) <span class="cov0" title="0">{
+        for </span><span class="cov0" title="0">{
+                select </span>{
+                case &lt;-ctx.Done():<span class="cov0" title="0">
+                        return</span>
+                case msgData, ok := &lt;-workerChan:<span class="cov0" title="0">
+                        if !ok </span><span class="cov0" title="0">{
+                                return
+                        }</span>
+
+                        // Deserialize message
+                        <span class="cov0" title="0">message, err := c.deserializeMessage(msgData)
+                        if err != nil </span><span class="cov0" title="0">{
+                                // Log error and continue
+                                continue</span>
+                        }
+
+                        <span class="cov0" title="0">message.Topic = topic
+
+                        // Handle message with retry
+                        err = c.retryer.Retry(ctx, func(ctx context.Context) error </span><span class="cov0" title="0">{
+                                return handler(ctx, message)
+                        }</span>)
+
+                        // Note: Redis doesn't have built-in acknowledgment like RabbitMQ,
+                        // so we rely on the retry mechanism in the handler
+                        <span class="cov0" title="0">if err != nil </span>{<span class="cov0" title="0">
+                                // Could implement dead letter queue here
+                                // For now, we just log and continue
+                        }</span>
+                }
+        }
+}
+
+// deserializeMessage deserializes a message from JSON format
+func (c *RedisConsumer) deserializeMessage(data string) (*Message, error) <span class="cov0" title="0">{
+        var msgData map[string]interface{}
+        
+        err := c.options.Serializer.Deserialize([]byte(data), &amp;msgData)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to deserialize message: %w", err)
+        }</span>
+
+        <span class="cov0" title="0">message := &amp;Message{
+                Headers: make(map[string]interface{}),
+        }
+
+        // Extract fields
+        if id, ok := msgData["id"].(string); ok </span><span class="cov0" title="0">{
+                message.ID = id
+        }</span>
+
+        <span class="cov0" title="0">if body, ok := msgData["body"].(string); ok </span><span class="cov0" title="0">{
+                message.Body = []byte(body)
+        }</span>
+
+        <span class="cov0" title="0">if headers, ok := msgData["headers"].(map[string]interface{}); ok </span><span class="cov0" title="0">{
+                message.Headers = headers
+        }</span>
+
+        <span class="cov0" title="0">if timestamp, ok := msgData["timestamp"].(float64); ok </span><span class="cov0" title="0">{
+                message.Timestamp = time.Unix(int64(timestamp), 0)
+        }</span>
+
+        <span class="cov0" title="0">if deliveryCount, ok := msgData["delivery_count"].(float64); ok </span><span class="cov0" title="0">{
+                message.DeliveryCount = int(deliveryCount)
+        }</span>
+
+        <span class="cov0" title="0">if priority, ok := msgData["priority"].(float64); ok </span><span class="cov0" title="0">{
+                message.Priority = uint8(priority)
+        }</span>
+
+        <span class="cov0" title="0">return message, nil</span>
+}
+
+// Close closes the consumer
+func (c *RedisConsumer) Close() error <span class="cov0" title="0">{
+        c.mu.Lock()
+        defer c.mu.Unlock()
+
+        c.closed = true
+        return nil
+}</span>
+
+// Register Redis driver with the default factory
+func init() <span class="cov8" title="1">{
+        DefaultDriverFactory.Register(DriverRedis, func(info *URIInfo) (Driver, error) </span><span class="cov0" title="0">{
+                return NewRedisDriver(info)
+        }</span>)
+}</pre>
+		
+		<pre class="file" id="file5" style="display: none">package bimawen
+
+import (
+        "context"
+        "fmt"
+        "math"
+        "math/rand"
+        "time"
+)
+
+// RetryableError represents an error that can be retried
+type RetryableError struct {
+        Err       error
+        Retryable bool
+}
+
+// Error implements the error interface
+func (e *RetryableError) Error() string <span class="cov8" title="1">{
+        return e.Err.Error()
+}</span>
+
+// Unwrap returns the underlying error
+func (e *RetryableError) Unwrap() error <span class="cov0" title="0">{
+        return e.Err
+}</span>
+
+// IsRetryable returns whether the error is retryable
+func (e *RetryableError) IsRetryable() bool <span class="cov8" title="1">{
+        return e.Retryable
+}</span>
+
+// NewRetryableError creates a new retryable error
+func NewRetryableError(err error) *RetryableError <span class="cov8" title="1">{
+        return &amp;RetryableError{Err: err, Retryable: true}
+}</span>
+
+// NewNonRetryableError creates a new non-retryable error
+func NewNonRetryableError(err error) *RetryableError <span class="cov8" title="1">{
+        return &amp;RetryableError{Err: err, Retryable: false}
+}</span>
+
+// RetryFunc is the function type that can be retried
+type RetryFunc func(ctx context.Context) error
+
+// Retryer handles retry logic with exponential backoff
+type Retryer struct {
+        config *RetryConfig
+        rand   *rand.Rand
+}
+
+// NewRetryer creates a new retryer with the given configuration
+func NewRetryer(config *RetryConfig) *Retryer <span class="cov8" title="1">{
+        if config == nil </span><span class="cov0" title="0">{
+                config = DefaultRetryConfig()
+        }</span>
+        
+        <span class="cov8" title="1">return &amp;Retryer{
+                config: config,
+                rand:   rand.New(rand.NewSource(time.Now().UnixNano())),
+        }</span>
+}
+
+// Retry executes the function with exponential backoff retry logic
+func (r *Retryer) Retry(ctx context.Context, fn RetryFunc) error <span class="cov8" title="1">{
+        var lastErr error
+        
+        for attempt := 0; attempt &lt;= r.config.MaxRetries; attempt++ </span><span class="cov8" title="1">{
+                // Check context cancellation
+                select </span>{
+                case &lt;-ctx.Done():<span class="cov0" title="0">
+                        return ctx.Err()</span>
+                default:<span class="cov8" title="1"></span>
+                }
+                
+                // Execute the function
+                <span class="cov8" title="1">err := fn(ctx)
+                if err == nil </span><span class="cov8" title="1">{
+                        return nil // Success
+                }</span>
+                
+                <span class="cov8" title="1">lastErr = err
+                
+                // Check if this is a retryable error
+                if retryableErr, ok := err.(*RetryableError); ok &amp;&amp; !retryableErr.IsRetryable() </span><span class="cov8" title="1">{
+                        return err // Non-retryable error, fail immediately
+                }</span>
+                
+                // Don't wait after the last attempt
+                <span class="cov8" title="1">if attempt == r.config.MaxRetries </span><span class="cov0" title="0">{
+                        break</span>
+                }
+                
+                // Calculate backoff duration
+                <span class="cov8" title="1">backoff := r.calculateBackoff(attempt)
+                
+                // Wait for backoff duration or context cancellation
+                timer := time.NewTimer(backoff)
+                select </span>{
+                case &lt;-ctx.Done():<span class="cov8" title="1">
+                        timer.Stop()
+                        return ctx.Err()</span>
+                case &lt;-timer.C:<span class="cov8" title="1"></span>
+                        // Continue to next attempt
+                }
+        }
+        
+        <span class="cov0" title="0">return fmt.Errorf("max retries (%d) exceeded, last error: %w", r.config.MaxRetries, lastErr)</span>
+}
+
+// calculateBackoff calculates the backoff duration for the given attempt
+func (r *Retryer) calculateBackoff(attempt int) time.Duration <span class="cov8" title="1">{
+        // Calculate exponential backoff
+        backoff := float64(r.config.InitialInterval) * math.Pow(r.config.Multiplier, float64(attempt))
+        
+        // Apply maximum interval limit
+        if backoff &gt; float64(r.config.MaxInterval) </span><span class="cov0" title="0">{
+                backoff = float64(r.config.MaxInterval)
+        }</span>
+        
+        // Add randomization factor (jitter) to prevent thundering herd
+        <span class="cov8" title="1">if r.config.RandomizationFactor &gt; 0 </span><span class="cov8" title="1">{
+                jitter := r.rand.Float64() * r.config.RandomizationFactor * backoff
+                if r.rand.Intn(2) == 0 </span><span class="cov8" title="1">{
+                        backoff -= jitter
+                }</span> else<span class="cov0" title="0"> {
+                        backoff += jitter
+                }</span>
+        }
+        
+        // Ensure minimum backoff
+        <span class="cov8" title="1">if backoff &lt; 0 </span><span class="cov0" title="0">{
+                backoff = float64(r.config.InitialInterval)
+        }</span>
+        
+        <span class="cov8" title="1">return time.Duration(backoff)</span>
+}
+
+// RetryWithConfig is a convenience function that creates a retryer and executes the function
+func RetryWithConfig(ctx context.Context, config *RetryConfig, fn RetryFunc) error <span class="cov0" title="0">{
+        retryer := NewRetryer(config)
+        return retryer.Retry(ctx, fn)
+}</span>
+
+// SimpleRetry is a convenience function with default retry configuration
+func SimpleRetry(ctx context.Context, fn RetryFunc) error <span class="cov0" title="0">{
+        return RetryWithConfig(ctx, DefaultRetryConfig(), fn)
+}</span>
+
+// IsRetryableError checks if an error is retryable
+func IsRetryableError(err error) bool <span class="cov8" title="1">{
+        if retryableErr, ok := err.(*RetryableError); ok </span><span class="cov8" title="1">{
+                return retryableErr.IsRetryable()
+        }</span>
+        // By default, consider errors as retryable unless explicitly marked as non-retryable
+        <span class="cov0" title="0">return true</span>
+}
+
+// WrapRetryableError wraps an error as retryable or non-retryable based on the error type
+func WrapRetryableError(err error) error <span class="cov8" title="1">{
+        if err == nil </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+        
+        // Check for specific error types that should not be retried
+        <span class="cov8" title="1">switch </span>{
+        case IsContextError(err):<span class="cov8" title="1">
+                return NewNonRetryableError(err)</span>
+        case IsAuthenticationError(err):<span class="cov8" title="1">
+                return NewNonRetryableError(err)</span>
+        case IsValidationError(err):<span class="cov8" title="1">
+                return NewNonRetryableError(err)</span>
+        default:<span class="cov8" title="1">
+                return NewRetryableError(err)</span>
+        }
+}
+
+// IsContextError checks if the error is a context error
+func IsContextError(err error) bool <span class="cov8" title="1">{
+        return err == context.Canceled || err == context.DeadlineExceeded
+}</span>
+
+// IsAuthenticationError checks if the error is an authentication error
+func IsAuthenticationError(err error) bool <span class="cov8" title="1">{
+        // This is a simple implementation, you might want to check for specific error types
+        errStr := err.Error()
+        return contains(errStr, "authentication") || 
+                   contains(errStr, "unauthorized") || 
+                   contains(errStr, "access denied") ||
+                   contains(errStr, "permission denied")
+}</span>
+
+// IsValidationError checks if the error is a validation error
+func IsValidationError(err error) bool <span class="cov8" title="1">{
+        errStr := err.Error()
+        return contains(errStr, "validation") || 
+                   contains(errStr, "invalid") || 
+                   contains(errStr, "malformed")
+}</span>
+
+// contains is a helper function to check if a string contains a substring (case-insensitive)
+func contains(str, substr string) bool <span class="cov8" title="1">{
+        return len(str) &gt;= len(substr) &amp;&amp; 
+                   (str == substr || 
+                    (len(str) &gt; len(substr) &amp;&amp; 
+                     func() bool </span><span class="cov8" title="1">{
+                         for i := 0; i &lt;= len(str)-len(substr); i++ </span><span class="cov8" title="1">{
+                             if str[i:i+len(substr)] == substr </span><span class="cov8" title="1">{
+                                 return true
+                             }</span>
+                         }
+                         <span class="cov8" title="1">return false</span>
+                     }()))
+}</pre>
+		
+		<pre class="file" id="file6" style="display: none">package bimawen
+
+import (
+        "encoding/json"
+        "fmt"
+)
+
+// JSONSerializer implements JSON serialization
+type JSONSerializer struct{}
+
+// NewJSONSerializer creates a new JSON serializer
+func NewJSONSerializer() *JSONSerializer <span class="cov8" title="1">{
+        return &amp;JSONSerializer{}
+}</span>
+
+// Serialize converts data to JSON bytes
+func (s *JSONSerializer) Serialize(data interface{}) ([]byte, error) <span class="cov8" title="1">{
+        return json.Marshal(data)
+}</span>
+
+// Deserialize converts JSON bytes back to data
+func (s *JSONSerializer) Deserialize(data []byte, v interface{}) error <span class="cov8" title="1">{
+        return json.Unmarshal(data, v)
+}</span>
+
+// ContentType returns the JSON content type
+func (s *JSONSerializer) ContentType() string <span class="cov8" title="1">{
+        return "application/json"
+}</span>
+
+// SerializerRegistry manages available serializers
+type SerializerRegistry struct {
+        serializers map[string]Serializer
+}
+
+// NewSerializerRegistry creates a new serializer registry
+func NewSerializerRegistry() *SerializerRegistry <span class="cov8" title="1">{
+        registry := &amp;SerializerRegistry{
+                serializers: make(map[string]Serializer),
+        }
+        
+        // Register default JSON serializer
+        registry.Register("json", NewJSONSerializer())
+        registry.Register("application/json", NewJSONSerializer())
+        
+        return registry
+}</span>
+
+// Register registers a serializer with a content type
+func (r *SerializerRegistry) Register(contentType string, serializer Serializer) <span class="cov8" title="1">{
+        r.serializers[contentType] = serializer
+}</span>
+
+// Get retrieves a serializer by content type
+func (r *SerializerRegistry) Get(contentType string) (Serializer, error) <span class="cov8" title="1">{
+        serializer, exists := r.serializers[contentType]
+        if !exists </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("serializer not found for content type: %s", contentType)
+        }</span>
+        <span class="cov8" title="1">return serializer, nil</span>
+}
+
+// GetDefault returns the default JSON serializer
+func (r *SerializerRegistry) GetDefault() Serializer <span class="cov8" title="1">{
+        return r.serializers["json"]
+}</span>
+
+// DefaultSerializerRegistry is the global serializer registry
+var DefaultSerializerRegistry = NewSerializerRegistry()</pre>
+		
+		<pre class="file" id="file7" style="display: none">package bimawen
+
+import (
+        "crypto/tls"
+        "crypto/x509"
+        "fmt"
+        "os"
+)
+
+// TLSConfig contains TLS/SSL configuration
+type TLSConfig struct {
+        // Enable TLS/SSL
+        Enabled bool
+        
+        // InsecureSkipVerify controls whether a client verifies the server's certificate chain and host name
+        InsecureSkipVerify bool
+        
+        // CACert is the path to the CA certificate file
+        CACertFile string
+        
+        // ClientCert is the path to the client certificate file
+        ClientCertFile string
+        
+        // ClientKey is the path to the client private key file
+        ClientKeyFile string
+        
+        // ServerName is used to verify the hostname on the returned certificates
+        ServerName string
+        
+        // MinVersion contains the minimum SSL/TLS version that is acceptable
+        MinVersion uint16
+        
+        // MaxVersion contains the maximum SSL/TLS version that is acceptable
+        MaxVersion uint16
+}
+
+// DefaultTLSConfig returns a default TLS configuration
+func DefaultTLSConfig() *TLSConfig <span class="cov8" title="1">{
+        return &amp;TLSConfig{
+                Enabled:            false,
+                InsecureSkipVerify: false,
+                MinVersion:         tls.VersionTLS12,
+                MaxVersion:         tls.VersionTLS13,
+        }
+}</span>
+
+// BuildTLSConfig builds a Go TLS config from the TLSConfig
+func (tc *TLSConfig) BuildTLSConfig() (*tls.Config, error) <span class="cov8" title="1">{
+        if !tc.Enabled </span><span class="cov8" title="1">{
+                return nil, nil
+        }</span>
+
+        <span class="cov8" title="1">tlsConfig := &amp;tls.Config{
+                InsecureSkipVerify: tc.InsecureSkipVerify,
+                ServerName:         tc.ServerName,
+                MinVersion:         tc.MinVersion,
+                MaxVersion:         tc.MaxVersion,
+        }
+
+        // Load CA certificate if specified
+        if tc.CACertFile != "" </span><span class="cov0" title="0">{
+                caCert, err := os.ReadFile(tc.CACertFile)
+                if err != nil </span><span class="cov0" title="0">{
+                        return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+                }</span>
+
+                <span class="cov0" title="0">caCertPool := x509.NewCertPool()
+                if !caCertPool.AppendCertsFromPEM(caCert) </span><span class="cov0" title="0">{
+                        return nil, fmt.Errorf("failed to parse CA certificate")
+                }</span>
+                <span class="cov0" title="0">tlsConfig.RootCAs = caCertPool</span>
+        }
+
+        // Load client certificate if specified
+        <span class="cov8" title="1">if tc.ClientCertFile != "" &amp;&amp; tc.ClientKeyFile != "" </span><span class="cov0" title="0">{
+                clientCert, err := tls.LoadX509KeyPair(tc.ClientCertFile, tc.ClientKeyFile)
+                if err != nil </span><span class="cov0" title="0">{
+                        return nil, fmt.Errorf("failed to load client certificate: %w", err)
+                }</span>
+                <span class="cov0" title="0">tlsConfig.Certificates = []tls.Certificate{clientCert}</span>
+        }
+
+        <span class="cov8" title="1">return tlsConfig, nil</span>
+}
+
+// ParseTLSOptionsFromURI parses TLS options from URI query parameters
+func ParseTLSOptionsFromURI(options map[string]string) *TLSConfig <span class="cov8" title="1">{
+        config := DefaultTLSConfig()
+
+        // Check if TLS is enabled based on scheme or explicit option
+        if enabled, ok := options["tls"]; ok &amp;&amp; (enabled == "true" || enabled == "1") </span><span class="cov8" title="1">{
+                config.Enabled = true
+        }</span>
+
+        <span class="cov8" title="1">if skipVerify, ok := options["tls_insecure"]; ok &amp;&amp; (skipVerify == "true" || skipVerify == "1") </span><span class="cov8" title="1">{
+                config.InsecureSkipVerify = true
+        }</span>
+
+        <span class="cov8" title="1">if caCert, ok := options["tls_ca_cert"]; ok </span><span class="cov0" title="0">{
+                config.CACertFile = caCert
+        }</span>
+
+        <span class="cov8" title="1">if clientCert, ok := options["tls_client_cert"]; ok </span><span class="cov0" title="0">{
+                config.ClientCertFile = clientCert
+        }</span>
+
+        <span class="cov8" title="1">if clientKey, ok := options["tls_client_key"]; ok </span><span class="cov0" title="0">{
+                config.ClientKeyFile = clientKey
+        }</span>
+
+        <span class="cov8" title="1">if serverName, ok := options["tls_server_name"]; ok </span><span class="cov8" title="1">{
+                config.ServerName = serverName
+        }</span>
+
+        <span class="cov8" title="1">return config</span>
+}</pre>
+		
+		<pre class="file" id="file8" style="display: none">package bimawen
+
+import (
+        "context"
+        "time"
+)
+
+// Message represents a message in the message queue
+type Message struct {
+        // ID is the unique identifier of the message
+        ID string
+        
+        // Topic is the topic/queue name where the message belongs
+        Topic string
+        
+        // Body is the actual message content
+        Body []byte
+        
+        // Headers contains message metadata
+        Headers map[string]interface{}
+        
+        // Timestamp when the message was created
+        Timestamp time.Time
+        
+        // DeliveryCount tracks how many times this message has been delivered
+        DeliveryCount int
+        
+        // Priority of the message (0-255, higher means more priority)
+        Priority uint8
+        
+        // TTL (Time To Live) for the message
+        TTL time.Duration
+        
+        // Delay before the message becomes available for consumption
+        Delay time.Duration
+}
+
+// Producer defines the interface for message producers
+type Producer interface {
+        // Send sends a message synchronously
+        Send(ctx context.Context, topic string, message *Message) error
+        
+        // SendAsync sends a message asynchronously and returns a result channel
+        SendAsync(ctx context.Context, topic string, message *Message) &lt;-chan error
+        
+        // SendBatch sends multiple messages in a batch
+        SendBatch(ctx context.Context, topic string, messages []*Message) error
+        
+        // Close closes the producer and releases resources
+        Close() error
+}
+
+// Consumer defines the interface for message consumers
+type Consumer interface {
+        // Consume starts consuming messages from a topic
+        Consume(ctx context.Context, topic string, handler MessageHandler) error
+        
+        // ConsumeWithOptions starts consuming with specific options
+        ConsumeWithOptions(ctx context.Context, topic string, handler MessageHandler, opts *ConsumeOptions) error
+        
+        // Close closes the consumer and releases resources
+        Close() error
+}
+
+// MessageHandler is the function signature for handling consumed messages
+type MessageHandler func(ctx context.Context, message *Message) error
+
+// Driver defines the interface that all MQ drivers must implement
+type Driver interface {
+        // NewProducer creates a new producer instance
+        NewProducer(options *ProducerOptions) (Producer, error)
+        
+        // NewConsumer creates a new consumer instance
+        NewConsumer(options *ConsumerOptions) (Consumer, error)
+        
+        // HealthCheck checks if the connection is healthy
+        HealthCheck(ctx context.Context) error
+        
+        // Close closes the driver and all its connections
+        Close() error
+}
+
+// Serializer defines the interface for message serialization
+type Serializer interface {
+        // Serialize converts data to bytes
+        Serialize(data interface{}) ([]byte, error)
+        
+        // Deserialize converts bytes back to data
+        Deserialize(data []byte, v interface{}) error
+        
+        // ContentType returns the content type string
+        ContentType() string
+}
+
+// ProducerOptions contains configuration options for producers
+type ProducerOptions struct {
+        // URI connection string
+        URI string
+        
+        // Serializer for message encoding (defaults to JSON)
+        Serializer Serializer
+        
+        // Timeout for send operations
+        Timeout time.Duration
+        
+        // RetryConfig for failed operations
+        RetryConfig *RetryConfig
+        
+        // BatchSize for batch operations
+        BatchSize int
+        
+        // EnableConfirms enables publisher confirms (RabbitMQ only)
+        EnableConfirms bool
+        
+        // Additional driver-specific options
+        DriverOptions map[string]interface{}
+}
+
+// ConsumerOptions contains configuration options for consumers
+type ConsumerOptions struct {
+        // URI connection string
+        URI string
+        
+        // Serializer for message decoding (defaults to JSON)
+        Serializer Serializer
+        
+        // Concurrency level (number of concurrent message handlers)
+        Concurrency int
+        
+        // AutoAck whether to automatically acknowledge messages
+        AutoAck bool
+        
+        // RetryConfig for failed message processing
+        RetryConfig *RetryConfig
+        
+        // Additional driver-specific options
+        DriverOptions map[string]interface{}
+}
+
+// ConsumeOptions contains runtime options for consuming messages
+type ConsumeOptions struct {
+        // ConsumerGroup for grouped consumption (if supported by driver)
+        ConsumerGroup string
+        
+        // MaxMessages limits the number of messages to consume
+        MaxMessages int
+        
+        // Timeout for consume operation
+        Timeout time.Duration
+}
+
+// RetryConfig defines retry behavior configuration
+type RetryConfig struct {
+        // MaxRetries maximum number of retry attempts
+        MaxRetries int
+        
+        // InitialInterval initial retry interval
+        InitialInterval time.Duration
+        
+        // MaxInterval maximum retry interval
+        MaxInterval time.Duration
+        
+        // Multiplier for exponential backoff
+        Multiplier float64
+        
+        // RandomizationFactor adds jitter to retry intervals
+        RandomizationFactor float64
+}
+
+// ConnectionConfig contains common connection configuration
+type ConnectionConfig struct {
+        // URI connection string
+        URI string
+        
+        // ConnectTimeout timeout for establishing connection
+        ConnectTimeout time.Duration
+        
+        // KeepAlive interval for connection health checks
+        KeepAlive time.Duration
+        
+        // MaxRetries for connection attempts
+        MaxRetries int
+        
+        // TLS configuration
+        TLSConfig interface{}
+}
+
+// DefaultRetryConfig returns a sensible default retry configuration
+func DefaultRetryConfig() *RetryConfig <span class="cov8" title="1">{
+        return &amp;RetryConfig{
+                MaxRetries:          3,
+                InitialInterval:     1 * time.Second,
+                MaxInterval:         30 * time.Second,
+                Multiplier:          2.0,
+                RandomizationFactor: 0.1,
+        }
+}</span>
+
+// DefaultProducerOptions returns default producer options
+func DefaultProducerOptions() *ProducerOptions <span class="cov8" title="1">{
+        return &amp;ProducerOptions{
+                Timeout:       30 * time.Second,
+                RetryConfig:   DefaultRetryConfig(),
+                BatchSize:     100,
+                DriverOptions: make(map[string]interface{}),
+        }
+}</span>
+
+// DefaultConsumerOptions returns default consumer options
+func DefaultConsumerOptions() *ConsumerOptions <span class="cov8" title="1">{
+        return &amp;ConsumerOptions{
+                Concurrency:   10,
+                AutoAck:       false,
+                RetryConfig:   DefaultRetryConfig(),
+                DriverOptions: make(map[string]interface{}),
+        }
+}</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
